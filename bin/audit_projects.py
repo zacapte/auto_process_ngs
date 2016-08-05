@@ -261,6 +261,16 @@ if __name__ == "__main__":
             print "\t%s:\t%s\t%s" % (project.run,
                                      project.name,
                                      utils.format_file_size(project.disk_usage))
+    print "\nAll assigned projects:"
+    print "======================="
+    print "\t".join("#PI","Researcher","Platform","Run","Nsamples")
+    for PI in PI_list:
+        for project in auditor.projects(PI=PI):
+            print "\t".join([str(x) for x in (project.PI,
+                                              project.user,
+                                              project.platform,
+                                              project.run_number,
+                                              project.samples)])
     undetermined = auditor.projects(name='undetermined')
     if undetermined:
         print "\nUsage for 'undetermined' reads:"
