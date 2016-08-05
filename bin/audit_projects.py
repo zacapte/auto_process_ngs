@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 #
-#     audit_projects.py: summarise disk usage for sequencing projects
-#     Copyright (C) University of Manchester 2015 Peter Briggs
+#     audit_projects.py: summarise data for multiple sequencing projects
+#     Copyright (C) University of Manchester 2015-2016 Peter Briggs
 #
 """
-Summarise the disk usage for runs processed using 'auto_process'
+Summarise information for multiple runs processed using 'auto_process'
 
 """
 
@@ -18,6 +18,137 @@ import os
 import sys
 import bcftbx.utils as utils
 from auto_process_ngs.utils import AnalysisDir
+from auto_process_ngs.utils import AnalysisProject
+
+#######################################################################
+# Classes
+#######################################################################
+
+class ProjectAuditor(object):
+    """
+    Class for auditing analysis projects from auto_process_ngs
+
+    """
+    def __init__(self):
+        self._projects = []
+
+    def add(self,project):
+        """
+        Add an AnalysisProject to the auditor
+
+        Arguments:
+          project (AnalysisProject): project to add to the
+            auditor
+
+        """
+        self._projects.append(AuditProject(project))
+
+    def PIs(self,name=None):
+        """
+        Return list of PI names
+
+        Arguments:
+          name (str): optional PI name to look for; can
+            include wildcard characters
+
+        """
+        PIs = list(set(filter(lambda p: p is not None,
+                              [p.PI for p in self._projects])))
+        if name is not None:
+            return filter(lambda x: fnmatch.fnmatch(x,name),PIs)
+        return PIs
+
+    def projects(self,name=None,PI=None,
+                 no_PI=False,
+                 exclude_undetermined=False):
+        """
+        Return list of projects
+
+        By default all projects are returned; the list
+        can be filtered by specifying:
+
+        name: project name (can include wildcards)
+        PI: PI name (can include wildcards)
+
+        Optional modifiers:
+
+        no_PI: if True then return projects with no PI
+        assigned (ignored if 'PI' is specified)
+        exclude_undetermined: if True then projects
+        named 'undetermined' are excluded
+
+        """
+        projects = [p for p in self._projects]
+        # Exclude undetermined
+        if exclude_undetermined:
+            projects = filter(lambda p: p.name != 'undetermined',
+                              projects)
+        # Filter on project name
+        if name is not None:
+            projects = filter(lambda p: fnmatch.fnmatch(p.name,name),
+                              projects)
+        # Filter on PI name
+        if PI is not None:
+            projects = filter(lambda p: (p.PI is not None) and (fnmatch.fnmatch(p.PI,PI)),
+                              projects)
+        elif no_PI:
+            projects = filter(lambda p: p.PI is None,projects)
+        return projects
+
+    def disk_usage(self,PI=None):
+        """
+        Return disk usage (bytes) for specified criteria
+        """
+        if PI is not None:
+            return sum([p.disk_usage
+                        for p in self.projects(PI=PI)])
+        # Return total usage for all projects
+        return sum([p.disk_usage for p in self.projects()])
+
+class AuditProject(object):
+    """
+    Class representing an AnalysisProject for auditing
+
+    """
+    def __init__(self,project):
+        """
+        Create a new AuditProject instance
+
+        Arguments:
+          project (AnalysisProject): analysis project to audit
+
+        """
+        self._size = None
+        self._project = project
+        self._parent = AnalysisDir(os.path.dirname(self._project.dirn))
+        #
+        self.name = self._project.name
+        self.run = self._project.info.run
+        self.PI = self._project.info.PI
+        self.user = self._project.info.user
+        self.platform = self._project.info.platform
+        self.samples = len(self._project.samples)
+        #
+        self.run_number = self._parent.metadata.run_number
+
+    @property
+    def disk_usage(self):
+        """
+        Return disk_usage (in bytes) for project
+        """
+        if self._size is None:
+            self._size = get_size(self._project.dirn)
+            if self._project.fastqs_are_symlinks:
+                # Actual fastq files are outside the project
+                # and need to be explicitly added
+                for fq in self._project.fastqs:
+                    try:
+                        self._size += get_size(
+                            utils.Symlink(fq).resolve_target())
+                    except Exception,ex:
+                        raise OSError("Failed to get size for fastq file "
+                                      "'%s': %s" % (fq,ex))
+        return self._size
 
 #######################################################################
 # Functions
@@ -66,101 +197,76 @@ if __name__ == "__main__":
                               "corresponding to different runs. The program reports "
                               "total disk usage for projects assigned to each PI across "
                               "all DIRs.")
-    p.add_option("--pi",action='store',dest="pi_name",default=None,
-                 help="List data for PI(s) matching PI_NAME (can use glob-style "
+    p.add_option("--PI",action='store',dest="PI_name",default=None,
+                 help="List data for specific PI(s) matching PI_NAME (can use glob-style "
                  "patterns)")
     p.add_option("--unassigned",action='store_true',dest="unassigned",default=False,
                  help="List data for projects where PI is not assigned")
+    ##p.add_option("--report",type='choice',action='store',dest="report_type",
+    ##             choices=['disk_usage',],default='disk_usage',
+    ##             help="Type of data to report; must be one of 'disk_usage' (default), "
+    ##             "'projects'")
+    ##p.add_option("--xlsx",action='store',dest="xlxs_file",default=None,
+    ##             help="Output report to Excel spreadsheet XLSX_FILE")
     opts,args = p.parse_args()
     # Collect data
-    audit_data = {}
-    unassigned = []
-    undetermined = []
+    auditor = ProjectAuditor()
     for d in args:
         for dirn in utils.list_dirs(d):
             dirn = os.path.join(d,dirn)
             #print "Examining %s" % dirn
             try:
                 run = AnalysisDir(dirn)
-                for p in run.get_projects():
-                    if p.name == "undetermined":
-                        undetermined.append((p,get_size(p.dirn)))
-                        continue
-                    pi = p.info.PI
-                    if pi is None:
-                        # PI is not assigned
-                        p.info['run'] = os.path.basename(dirn)
-                        unassigned.append(p)
-                        continue
-                    elif opts.pi_name is not None:
-                        if not fnmatch.fnmatch(pi,opts.pi_name):
-                            # Skip non-matching name
-                            continue
-                    #print "\t%s: %s" % (p.name,pi)
-                    if pi not in audit_data:
-                        audit_data[pi] = []
-                    # Acquire size of data
-                    size = get_size(p.dirn)
-                    if p.fastqs_are_symlinks:
-                        # Actual fastq files are outside the project
-                        # and need to be explicitly added
-                        for fq in p.fastqs:
-                            try:
-                                size += get_size(utils.Symlink(fq).resolve_target())
-                                #if os.path.islink(fq):
-                                #    s = utils.Symlink(fq)
-                                #    size += get_size(s.resolve_target())
-                            except Exception,ex:
-                                print "Failed to get size for fastq file: %s" % fq
-                                print "%s" % ex
-                                sys.exit(1)
-                    # Add to list of projects
-                    audit_data[pi].append((p,size))
+                for project in run.get_projects():
+                    auditor.add(project)
             except Exception,ex:
-                print "Failed to load as run: %s" % ex
-                pass
-    # Sort into order by disk usage
-    pi_list = audit_data.keys()
-    pi_list = sorted(pi_list,key=lambda x: sum([y[1] for y in audit_data[x]]),
-                     reverse=True)
-    # Report the unassigned projects, if requested
+                print "Failed to load directory '%s' as run: %s" % \
+                    (dirn,ex)
+    # Report unassigned projects
     if opts.unassigned:
-        print "%d unassigned projects:" % len(unassigned)
-        unassigned = sorted(unassigned,key=lambda x: str(x).split('_')[0])
+        unassigned = auditor.projects(no_PI=True,
+                                      exclude_undetermined=True)
+        print "%d unassigned projects (no PI):" % len(unassigned)
         for project in unassigned:
             print "%s: %s" % (project.name,project.info.run)
-        sys.exit(0)
+            sys.exit(0)
+    # Fetch PIs and sort into disk usage order
+    PI_list = sorted(auditor.PIs(name=opts.PI_name),
+                     key=lambda x: auditor.disk_usage(PI=x),
+                     reverse=True)
     # Report if no PIs were found
-    if len(pi_list) == 0:
+    if len(PI_list) == 0:
         print "No projects assigned to PIs found"
         sys.exit(0)
     # Report PIs, projects etc
     print "Summary (PI, # of projects, total usage):"
     print "========================================="
     total_projects = 0
-    total_size = 0
-    for pi in pi_list:
-        n_projects = len(audit_data[pi])
-        size = sum([p[1] for p in audit_data[pi]])
-        print "%s\t%d\t%s" % (pi,n_projects,
-                              utils.format_file_size(size))
+    total_disk_usage = 0
+    for PI in PI_list:
+        n_projects = len(auditor.projects(PI=PI))
+        disk_usage = auditor.disk_usage(PI=PI)
+        print "%s\t%d\t%s" % (PI,
+                              n_projects,
+                              utils.format_file_size(disk_usage))
         total_projects += n_projects
-        total_size += size
+        total_disk_usage += disk_usage
     print "Total usage\t%d\t%s" % (total_projects,
-                                   utils.format_file_size(total_size))
+                                   utils.format_file_size(total_disk_usage))
     print "\nBreakdown by PI/project:"
     print "========================"
-    for pi in pi_list:
-        print "%s:" % pi
-        for project,size in audit_data[pi]:
-            print "\t%s:\t%s\t%s" % (project.info.run,project.name,
-                                     utils.format_file_size(size))
+    for PI in PI_list:
+        print "%s:" % PI
+        for project in auditor.projects(PI=PI):
+            print "\t%s:\t%s\t%s" % (project.run,
+                                     project.name,
+                                     utils.format_file_size(project.disk_usage))
+    undetermined = auditor.projects(name='undetermined')
     if undetermined:
         print "\nUsage for 'undetermined' reads:"
         print "==============================="
         total_size = 0
-        for u,size in undetermined:
-            print "%s\t%s" % (u.info.run,utils.format_file_size(size))
-            total_size += size
-        print "Total usage\t%s" % utils.format_file_size(total_size)
-        
+        for project in undetermined:
+            print "%s\t%s" % (project.run,
+                              utils.format_file_size(project.disk_usage))
+            total_size += project.disk_usage
