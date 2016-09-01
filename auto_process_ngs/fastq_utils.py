@@ -14,6 +14,7 @@ fastq_utils.py
 
 Utility functions for operating on Fastq files:
 
+- collect_fastqs: return Fastqs from CASAVA/bcl2fastq output dir
 - assign_barcodes_single_end: extract and assign inline barcodes
 
 """
@@ -22,12 +23,86 @@ Utility functions for operating on Fastq files:
 # Imports
 #######################################################################
 
+import os
 import gzip
+from bcftbx.IlluminaData import IlluminaData
+from bcftbx.IlluminaData import IlluminaFastq
+from bcftbx.IlluminaData import IlluminaDataError
 from bcftbx.FASTQFile import FastqIterator
 
 #######################################################################
 # Functions
 #######################################################################
+
+def collect_fastqs(dirn,lane=None,read=None,unaligned_dir=None):
+    """
+    Automatically collect Fastq files from bcl2fastq/CASAVA output dir
+
+    Arguments:
+      dirn (str): path to the directory to collect files from (can
+        be either the bcl2fastq/CASAVA output dir, or the directory
+        above in which case the `unaligned_dir` should also be
+        specified)
+      lane (integer): optionally restrict the Fastqs to those with
+        the specified lane in their names (default is to return Fastqs
+        for all lanes)
+      read_number (integer): optionally restrict the Fastqs to the
+        specified read number (1 or 2) (default is to return both R1
+        and R2)
+      unaligned_dir (str): specify the subdirectory of `dirn` with
+        the bcl2fastq/CASAVA outputs (if `dirn` is not that directory)
+
+    Returns:
+      List: either a list of R1/R2 Fastq filename pairs, or a "flat"
+        list of either R1 or R2 Fastq filenames (if ``read`` argument
+        was specified)
+
+    """
+    # Load data into IlluminaData instance
+    if unaligned_dir is None:
+        unaligned_dir = os.path.basename(dirn.rstrip(os.sep))
+        dirn = os.path.dirname(os.path.abspath(dirn.rstrip(os.sep)))
+    try:
+        illumina_data = IlluminaData(dirn,unaligned_dir=unaligned_dir)
+    except Exception as ex:
+        raise IlluminaDataError("Unable to read fastqs from %s: %s\n" %
+                                (dirn,ex))
+    # Collect fastq R1/R2 pairs
+    fastqs_r = dict()
+    fastqs_r[1] = []
+    fastqs_r[2] = []
+    for project in illumina_data.projects:
+        for sample in project.samples:
+            fastqs_r[1].extend(sample.fastq_subset(read_number=1,
+                                                   full_path=True))
+            fastqs_r[2].extend(sample.fastq_subset(read_number=2,
+                                                   full_path=True))
+    if illumina_data.undetermined:
+        for sample in illumina_data.undetermined.samples:
+            fastqs_r[1].extend(sample.fastq_subset(read_number=1,
+                                                   full_path=True))
+            fastqs_r[2].extend(sample.fastq_subset(read_number=2,
+                                                   full_path=True))
+    # Filter by lane
+    if lane is not None:
+        fastqs_r[1] = filter(lambda fq: IlluminaFastq(fq).lane_number == lane,
+                             fastqs_r[1])
+        fastqs_r[2] = filter(lambda fq: IlluminaFastq(fq).lane_number == lane,
+                             fastqs_r[2])
+    # Sort into order
+    fastqs_r[1].sort()
+    fastqs_r[2].sort()
+    # Handle when only one read is selected
+    if read is not None:
+        fastqs = fastqs_r[read]
+    else:
+        if not illumina_data.paired_end:
+            fastqs = fastqs_r[1]
+        else:
+            fastqs = []
+            for fq1,fq2 in zip(fastqs_r[1],fastqs_r[2]):
+                fastqs.extend([fq1,fq2])
+    return fastqs
 
 def assign_barcodes_single_end(fastq_in,fastq_out,n=5):
     """
